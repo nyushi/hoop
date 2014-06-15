@@ -14,7 +14,7 @@ import (
 
 type apiServer struct {
 	*http.Server
-	Hoops map[int]*hoop.Hoop
+	TCPHoops map[int]*hoop.Hoop
 }
 
 func newAPIServer() *apiServer {
@@ -31,7 +31,7 @@ func newAPIServer() *apiServer {
 
 func (api *apiServer) setUp() {
 	m := http.NewServeMux()
-	m.Handle("/ports/", http.StripPrefix("/ports/", http.HandlerFunc(api.handlePort)))
+	m.Handle("/ports/tcp/", http.StripPrefix("/ports/tcp/", http.HandlerFunc(api.handleTCPPort)))
 	m.Handle("/ports", http.StripPrefix("/ports", http.HandlerFunc(api.handlePorts)))
 	api.Server.Handler = m
 }
@@ -43,49 +43,65 @@ func (api *apiServer) start() {
 
 func (api *apiServer) handlePorts(w http.ResponseWriter, r *http.Request) {
 	b := bytes.NewBuffer(nil)
-	for lport, h := range api.Hoops {
+	for lport, h := range api.TCPHoops {
 		b.WriteString(fmt.Sprintf("%d -> %s\n", lport, h.Remote))
 	}
 	w.Write(b.Bytes())
 }
 
-func (api *apiServer) handlePort(w http.ResponseWriter, r *http.Request) {
-	defer r.Body.Close()
-
+func (api *apiServer) parseLocalPort(r *http.Request) (int, error) {
 	lport64, err := strconv.ParseInt(r.URL.Path, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+	return int(lport64), nil
+}
+
+func (api *apiServer) parseBody(r *http.Request) (remote string, err error) {
+	defer r.Body.Close()
+	b, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		return
+	}
+	remote = string(b)
+	return
+}
+
+func (api *apiServer) handleTCPPort(w http.ResponseWriter, r *http.Request) {
+	lport, err := api.parseLocalPort(r)
 	if err != nil {
 		w.WriteHeader(400)
 		w.Write([]byte("invalid listen port"))
 		return
 	}
-	lport := int(lport64)
-
-	remote, err := ioutil.ReadAll(r.Body)
-	if err != nil {
-		w.WriteHeader(400)
-		w.Write([]byte("failed to read body"))
-	}
 
 	if r.Method == "DELETE" {
-		h, ok := api.Hoops[lport]
+		h, ok := api.TCPHoops[lport]
 		if ok {
 			h.Stop()
 		}
-		delete(api.Hoops, lport)
+		delete(api.TCPHoops, lport)
 		w.Write([]byte("OK"))
-		log.Printf("delete %d -> %s", lport, string(remote))
+		log.Printf("delete %d -> %s", lport, h.Remote)
 		return
 	}
 
-	log.Printf("update %d -> %s", lport, string(remote))
+	remote, err := api.parseBody(r)
+	if err != nil {
+		w.WriteHeader(400)
+		w.Write([]byte("failed to read body"))
+		return
+	}
 
-	h, ok := api.Hoops[lport]
+	log.Printf("update %d -> %s", lport, remote)
+
+	h, ok := api.TCPHoops[lport]
 	if !ok {
 		h = hoop.NewHoop(lport, string(remote))
-		api.Hoops[lport] = h
+		api.TCPHoops[lport] = h
 		err = h.Start()
 	} else {
-		h.Remote = string(remote)
+		h.Remote = remote
 	}
 	if err != nil {
 		fmt.Println(err)
