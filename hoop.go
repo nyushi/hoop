@@ -1,37 +1,72 @@
 package hoop
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 
 	"github.com/nyushi/traproxy"
 )
 
+// Protocol definition
+const (
+	TCP = iota
+	UDP = iota
+)
+
+type closer interface {
+	Close() error
+}
+
 type Hoop struct {
 	ListenPort int
+	Proto      int
 	Remote     string
-	Listener   net.Listener
+	conn       io.Closer
 	running    bool
 }
 
-func NewHoop(port int, remote string) *Hoop {
+func NewHoop(port, proto int, remote string) *Hoop {
 	h := &Hoop{}
 	h.running = true
+	h.Proto = proto
 	h.ListenPort = port
 	h.Remote = remote
 	return h
 }
 
+func ProtoString(p int) string {
+	switch p {
+	case TCP:
+		return "tcp"
+	case UDP:
+		return "udp"
+	}
+	return ""
+}
+
 func (h *Hoop) Start() error {
+	switch h.Proto {
+	case TCP:
+		return h.startTCP()
+	case UDP:
+		return h.startUDP()
+	}
+	return errors.New("unknown protocol")
+}
+
+func (h *Hoop) startTCP() error {
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", h.ListenPort))
-	h.Listener = l
+	h.conn = l
 	if err != nil {
 		return err
 	}
 	go func() {
 		for h.running {
-			c, err := h.Listener.Accept()
+			l := h.conn.(net.Listener)
+			c, err := l.Accept()
 			if err != nil {
 				continue
 			}
@@ -58,7 +93,31 @@ func (h *Hoop) Start() error {
 	return nil
 }
 
+func (h *Hoop) startUDP() error {
+	laddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", h.ListenPort))
+	l, err := net.ListenUDP("udp", laddr)
+	h.conn = l
+	if err != nil {
+		return err
+	}
+
+	r, err := net.Dial("udp", h.Remote)
+	if err != nil {
+		return err
+	}
+	go func() {
+		for h.running {
+			buf := make([]byte, 65507)
+			rsize, err := l.Read(buf)
+			if err != nil {
+				continue
+			}
+			r.Write(buf[0:rsize])
+		}
+	}()
+	return nil
+}
 func (h *Hoop) Stop() {
 	h.running = false
-	h.Listener.Close()
+	h.conn.Close()
 }
